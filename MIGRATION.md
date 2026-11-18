@@ -25,7 +25,7 @@ Pilots (done, proven end to end):
 | svelte-crossword, jpc.finance.native, jpc-since, flashstack, phrasepack, spork, stickies, taskflow, travel, holiday-hue, stoop, jpc.eats.native, cadence-ios | no | — | — | no |
 
 No repo uses rulesets. Every protected repo needs the protected-repo bump setup below
-(`ci-workflow:` + `workflow_dispatch:`, or `DEPLOY_PAT`).
+(see "Protected repos: the bump PR" below).
 
 ## Checklist (every repo)
 
@@ -54,13 +54,22 @@ No repo uses rulesets. Every protected repo needs the protected-repo bump setup 
   peek and most repos), PR creation fails and the action pushes the commit straight to
   an UNPROTECTED main with a warning; on a protected main it fails loudly after the
   upload succeeded. A bot-merged bump triggers no workflows (same as `[skip ci]`).
-- **PRs opened with GITHUB_TOKEN start no `pull_request` workflows**, so a protected
-  repo's bump PR would wait forever for its required checks. Either pass
-  `ci-workflow: <ci file>` (the bump step dispatches it on the branch; the CI file must
-  have `workflow_dispatch:` and its jobs must not be skipped for that event) or add a
-  `DEPLOY_PAT` secret (checkout + PR use it, and a PAT-opened PR runs CI normally).
-  Protected repos with `strict: true` also need the branch up to date: if main moved
-  during the deploy, update the bump branch (`gh pr update-branch`).
+- **Protected repos: the bump PR** (proven end to end on the scratch repo
+  johnpc/ci-workflows-bump-test, strict protected main, PRs #1-#3). The bot's PR DOES
+  get its own `pull_request` run, but on public repos it is gated by "approval for
+  first-time contributors", and a gated run blocks the required checks: a
+  `workflow_dispatch` run's checks on the same commit do NOT count (PR #1 stayed
+  BLOCKED until its run was approved). `version-bump-pr` therefore approves its own
+  PR's gated runs (needs `actions: write`), runs `gh pr update-branch` when the PR is
+  BEHIND a strict main, and first rebases the bump onto the current main (a branch cut
+  from the old commit is refused outright when main's move touched
+  `.github/workflows`). `ci-workflow:` is only a fallback for when no PR run appears.
+  Each protected repo needs: *Allow GitHub Actions to create and approve pull
+  requests* ON, *Allow auto-merge* ON (already on for all seven), and CI jobs whose
+  owner guard admits `github-actions[bot]` — a job skipped by `if:` reports as passing,
+  so a johnpc-only guard (peek, pipe) lets the bump merge untested (acceptable for a
+  version-only change, but know it). A `DEPLOY_PAT` secret also works: its PR is not
+  gated.
 - **Required-check names**: a job that calls a reusable workflow reports as
   `<caller job id> / <reusable job name>` (e.g. `quality / Lint, Test, Coverage, CRAP & Build`).
   Deploy jobs are never required checks, so migrating a deploy is safe everywhere. For
@@ -171,7 +180,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:      # lets a bump PR's checks be dispatched (protected repos)
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
@@ -244,8 +253,7 @@ green run, and for sandbox CI check the teardown deleted the stack).
   `smoke-command: SMOKE_WEB_BUILD=0 SMOKE_CONFIGURATION=Release SMOKE_RUN_TAG=deploy-${{ github.run_id }}-${{ github.run_attempt }} bash scripts/ios-launch-smoke.sh`
   and keep the default `smoke-artifact-paths` (screenshot, logs, stdout; DerivedData and
   `.app` bundles are always excluded). Copy any env its smoke reads into `secret-env`.
-  Being protected, its bump needs `ci-workflow: ci.yml` (+ `workflow_dispatch:` in
-  `ci.yml`) or `DEPLOY_PAT`; its required checks are CI jobs, so migrating only the
+  Being protected, its bump needs the protected-repo setup above; its required checks are CI jobs, so migrating only the
   deploy leaves protection untouched.
 - docker-publish: `docker-publish.yml` with `image: <its current image>`; check its
   current tags/platforms match (it uses build-push v6, amd64+arm64).
@@ -294,10 +302,8 @@ jobs:
   action's `remove-pods`). The "Revoke stale API-created certificates" step is dropped:
   manual signing uses the CI keychain's long-lived cert and must NOT revoke API certs
   (the helper itself creates team certs through the API). Its own bump flow already used
-  a PR + `--auto`, but the PR is opened with GITHUB_TOKEN, so CI never ran on it
-  (no bump PR has happened yet, so it was never exercised). Fix: add
-  `workflow_dispatch:` to `ci.yml` and keep `ci-workflow: ci.yml` above (or add a
-  `DEPLOY_PAT` secret). Its CI author guard (`johnpc` or `github-actions[bot]`) already
+  a PR + `--auto`, but nothing approved the bot PR's gated run, so it would have sat
+  BLOCKED (never exercised: no bump has happened). The shared action approves it. Its CI author guard (`johnpc` or `github-actions[bot]`) already
   lets dispatched/bot runs through; a dispatch is not `pull_request`, so the guard passes.
 - `sandbox-cleanup.yml`: standard caller (default `npm run sandbox:sweep --`).
 - CI (`sandbox`, `quality`, `acceptance`, `acceptance-fake`, `teardown`): optional second
@@ -353,8 +359,7 @@ jobs:
   Behavior change to verify: pipe archives UNSIGNED and cloud-signs at export today;
   the shared flow signs in the archive with the CI keychain (keeps entitlements).
   Confirm the first upload and that `pipe/Secrets.xcconfig` is not committed by the
-  bump (the bump only `git add`s the pbxproj). Protected: add `ci-workflow: quality-gates.yml`
-  (+ `workflow_dispatch:` there) or `DEPLOY_PAT`, and note its old `[skip ci]` push to
+  bump (the bump only `git add`s the pbxproj). Protected: needs the protected-repo bump setup above, and note its old `[skip ci]` push to
   main could never have landed.
 
 ### jpc.fit.native (native + watch app; main PROTECTED, strict, 5 required checks; auto-merge bump PR)
@@ -375,9 +380,8 @@ jobs:
       ci-workflow: quality-gates.yml
 ```
   Required checks are unaffected (only `deploy` changes). Its bump PR had the same
-  GITHUB_TOKEN-no-CI gap: add `workflow_dispatch:` to `quality-gates.yml` so
-  `ci-workflow` can produce the five checks on the bump branch (the jobs' owner guard
-  passes for dispatch), or add `DEPLOY_PAT`. The helper signs the watch app and
+  gap (nothing approved the gated bot run); the shared action approves it, and its
+  owner guard already admits `github-actions[bot]`. The helper signs the watch app and
   extension targets too (each gets its own `<bundle id> CI AppStore` profile).
 
 ### peek (native; main PROTECTED, strict, 1 required check; cloud-signed today)
@@ -389,7 +393,9 @@ jobs:
 - Its bump is broken today: on a version conflict it `git push`es to a protected main
   (rejected) after uploading. The shared flow opens a PR instead — but peek has
   *Allow GitHub Actions to create PRs* OFF, so turn that on (or add `DEPLOY_PAT`).
-  `quality-gates.yml` already has `workflow_dispatch:`, so `ci-workflow` works as is.
+  Run 44388581759 hit the real conflict: upload succeeded, then the bump step died
+  with `gh: command not found` (peek's runner `.path` has no /opt/homebrew/bin; fixed
+  in v1.2.0), so its bumped MARKETING_VERSION is not recorded in git yet.
 - It archives unsigned with `-derivedDataPath /Users/john/peek-ci/...` and exports in the
   user session via `sudo launchctl asuser` (the daemon-context export crashed in
   AppSSO with automatic signing). Manual CI-keychain signing (what the shared flow does)
