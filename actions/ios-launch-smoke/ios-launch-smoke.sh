@@ -33,6 +33,17 @@
 # `simctl launch` right after install can race SpringBoard, so retry ~30 s; `log`
 # echoes its own predicate, so exclude it; never touch the shared booted simulators.
 set -euo pipefail
+# Self-hosted runners' .path may be just /usr/bin:/bin:/usr/sbin:/sbin (peek's is), so
+# Homebrew tools (gh, pod, python3) are not found: put the usual prefixes first.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+require_tools() {
+  local t
+  for t in "$@"; do
+    command -v "$t" >/dev/null 2>&1 || { echo "::error title=Missing tool::'$t' is not on PATH ($PATH) on runner ${RUNNER_NAME:-?}. Install it (brew install $t) or fix the runner's .path."; exit 127; }
+  done
+}
+require_tools xcrun xcodebuild python3 rsync git
+[ ! -f "${SMOKE_ROOT:-$PWD}/${SMOKE_IOS_DIR:-ios/App}/Podfile" ] || require_tools pod
 cd "${SMOKE_ROOT:-$PWD}"
 
 IOS="${SMOKE_IOS_DIR:-ios/App}"

@@ -7,6 +7,16 @@
 # overwritten by other apps' deploys running at the same time on the Mac mini
 # (cadence lost an upload to another app's ExportOptions).
 set -euo pipefail
+# Self-hosted runners' .path may be just /usr/bin:/bin:/usr/sbin:/sbin (peek's is), so
+# Homebrew tools (gh, pod, python3) are not found: put the usual prefixes first.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+require_tools() {
+  local t
+  for t in "$@"; do
+    command -v "$t" >/dev/null 2>&1 || { echo "::error title=Missing tool::'$t' is not on PATH ($PATH) on runner ${RUNNER_NAME:-?}. Install it (brew install $t) or fix the runner's .path."; exit 127; }
+  done
+}
+require_tools xcodebuild python3 sed grep
 : "${PROJECT:?}" "${SCHEME:?}" "${ASC_KEY_PATH:?}" "${ASC_KEY_ID:?}" "${ASC_ISSUER_ID:?}"
 SIGNING="$ACTION_ROOT/ios-signing/ios_manual_signing.py"
 WORK="$RUNNER_TEMP/ios-release"

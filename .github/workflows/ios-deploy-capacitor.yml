@@ -166,6 +166,13 @@ jobs:
     env:
       IOS_DIR: ${{ inputs.ios-dir }}
     steps:
+      - name: Put Homebrew on PATH
+        run: |
+          # Some runners' .path is only /usr/bin:/bin:/usr/sbin:/sbin; later GITHUB_PATH
+          # entries win, so Homebrew (gh, pod, xcodegen, python3) ends up first.
+          echo /usr/local/bin >> "$GITHUB_PATH"
+          echo /opt/homebrew/bin >> "$GITHUB_PATH"
+
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.ref }}

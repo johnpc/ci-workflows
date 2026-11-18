@@ -3,6 +3,16 @@
 # caller uploads the bumped build FIRST, so a rejected push can never leave App Store
 # Connect without a build; this only persists the bump in git.
 set -euo pipefail
+# Self-hosted runners' .path may be just /usr/bin:/bin:/usr/sbin:/sbin (peek's is), so
+# Homebrew tools (gh, pod, python3) are not found: put the usual prefixes first.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+require_tools() {
+  local t
+  for t in "$@"; do
+    command -v "$t" >/dev/null 2>&1 || { echo "::error title=Missing tool::'$t' is not on PATH ($PATH) on runner ${RUNNER_NAME:-?}. Install it (brew install $t) or fix the runner's .path."; exit 127; }
+  done
+}
+require_tools gh git
 BUILD_NUM="${BUILD_NUM_INPUT:-${BUILD_NUM:-unknown}}"
 BASE="${BASE_INPUT:-}"
 [ -n "$BASE" ] || BASE=$(gh repo view "$GITHUB_REPOSITORY" --json defaultBranchRef --jq .defaultBranchRef.name)
@@ -44,6 +54,22 @@ echo "pr-url=$URL" >> "$GITHUB_OUTPUT"
 # Protected base: let GitHub merge it once the required checks pass. A PR opened
 # with GITHUB_TOKEN starts no pull_request workflows, so dispatch CI on the branch
 # (its check runs land on the same commit and satisfy the required checks).
+# A strict protected main ("require branches to be up to date") never auto-merges a
+# branch that is behind, and auto-merge does not update it: if main moved during the
+# deploy, update the branch first (then the dispatched CI runs on the updated head).
+merge_state() { gh pr view "$URL" --json mergeStateStatus --jq .mergeStateStatus; }
+STATE=UNKNOWN
+for _ in 1 2 3 4 5 6; do
+  STATE=$(merge_state || echo UNKNOWN)
+  [ "$STATE" != "UNKNOWN" ] && break
+  sleep 5  # GitHub computes mergeability asynchronously right after creation
+done
+echo "merge state: $STATE"
+if [ "$STATE" = "BEHIND" ]; then
+  gh pr update-branch "$URL"
+  echo "updated $BRANCH with $BASE (main moved during the deploy)"
+fi
+
 if gh pr merge "$URL" --auto --squash --delete-branch 2>/tmp/bump-merge.$$; then
   STATE=$(gh pr view "$URL" --json state --jq .state)
   echo "auto-merge requested (state: $STATE)"

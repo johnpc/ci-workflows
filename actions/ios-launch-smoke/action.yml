@@ -41,6 +41,14 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Put Homebrew on PATH
+      shell: bash
+      run: |
+        # Some runners' .path is only /usr/bin:/bin:/usr/sbin:/sbin; later GITHUB_PATH
+        # entries win, so Homebrew (gh, pod, python3) ends up first.
+        echo /usr/local/bin >> "$GITHUB_PATH"
+        echo /opt/homebrew/bin >> "$GITHUB_PATH"
+
     - name: Launch smoke (the built app must start in a simulator)
       shell: bash
       env:
