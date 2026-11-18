@@ -25,6 +25,39 @@ while IFS= read -r pin; do
   [ -z "$pin" ] || PINS+=(--profile "$pin")
 done <<< "${PROFILES:-}"
 
+MARKER="$WORK/.started"; touch "$MARKER"
+DIAG="$RUNNER_TEMP/ios-release-diagnostics"
+
+# On an export/upload failure, surface what Xcode wrote elsewhere: the
+# .xcdistributionlogs bundle (IDEDistribution logs) and any xcodebuild crash report
+# since this step started (the AppSSO SIGTRAP shows up only there).
+diagnose() {
+  mkdir -p "$DIAG"
+  echo "::group::Export diagnostics"
+  local logs
+  logs=$( { echo "${OUTPUT:-}" | grep -oE '/[^ "]*\.xcdistributionlogs' || true
+            find "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -name '*.xcdistributionlogs' -newer "$MARKER" 2>/dev/null || true; } | sort -u)
+  for d in $logs; do
+    [ -d "$d" ] || continue
+    echo "== $d"; ls -la "$d"
+    # Only the standard/critical logs are kept: the verbose log carries full
+    # request traces, and artifacts of public repos are readable by anyone.
+    for f in "$d"/IDEDistribution.standard.log "$d"/IDEDistribution.critical.log; do
+      [ -f "$f" ] || continue
+      echo "-- tail $f"; tail -60 "$f"
+      cp "$f" "$DIAG/$(basename "$d")-$(basename "$f")" 2>/dev/null || true
+    done
+  done
+  [ -n "$logs" ] || echo "no .xcdistributionlogs found"
+  local crashes
+  crashes=$(find ~/Library/Logs/DiagnosticReports -maxdepth 1 -newer "$MARKER" \( -name 'xcodebuild*' -o -name 'IDEDistribution*' -o -name 'AppSSO*' \) 2>/dev/null || true)
+  for c in $crashes; do
+    echo "== crash report $c"; head -80 "$c"; cp "$c" "$DIAG/" 2>/dev/null || true
+  done
+  [ -n "$crashes" ] || echo "no xcodebuild crash report since this step started"
+  echo "::endgroup::"
+}
+
 sign_apply() {
   python3 -B "$SIGNING" apply "$PROJECT" --export-options "$EXPORT_OPTIONS" \
     --platform "${PLATFORM:-ios}" ${PINS[@]+"${PINS[@]}"}
@@ -60,6 +93,7 @@ echo "archive/export exit status: $STATUS"
 if [ "$STATUS" -eq 0 ]; then echo "bumped=false" >> "$GITHUB_OUTPUT"; exit 0; fi
 
 if ! echo "$OUTPUT" | grep -qi "version.*already exists\|already been uploaded\|redundant binary\|train.*closed\|higher version"; then
+  diagnose
   exit "$STATUS"
 fi
 
@@ -91,7 +125,8 @@ grep -q "MARKETING_VERSION = ${NEW_VERSION};" "$PBXPROJ" || { echo "::error::fai
 # Upload the bumped build FIRST, so a rejected push can never leave App Store
 # Connect without a build for this commit.
 sign_apply
-archive_and_upload
+OUTPUT=""
+archive_and_upload || { STATUS=$?; diagnose; exit "$STATUS"; }
 sign_revert
 {
   echo "bumped=true"

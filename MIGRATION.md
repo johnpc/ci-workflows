@@ -11,6 +11,22 @@ Pilots (done, proven end to end):
 | svelte-crossword (Capacitor, unprotected) | `ios-deploy-capacitor.yml@v1` | johnpc/svelte-crossword#55 |
 | jpc.finance.native (native, private, unprotected) | `ios-deploy-native.yml@v1` | johnpc/jpc.finance.native#33 |
 
+## Branch protection (verified against the API, 2026-11-18)
+
+| Repo | main protected | strict | required checks | auto-merge allowed |
+| --- | --- | --- | --- | --- |
+| cadence | yes | yes | 16 (`Lint, Test, Coverage, CRAP & Build`, `iOS Swift Tests`, 14× `Acceptance Tests (<area>)`) | yes |
+| jpc-noms | yes | yes | 16 | yes |
+| jpc.fit.native | yes | yes | 5 | yes |
+| pipe | yes | yes | 4 (`Build`, `Unit Tests + Coverage`, `CRAP Score Analysis`, `Acceptance`) | yes |
+| jpc-countdowns | yes | yes | 2 (`test`, `ios-launch`) | yes |
+| peek | yes | yes | 1 (`Build · Unit Tests · Coverage · CRAP · Acceptance`) | yes |
+| telly-apple | yes | yes | 1 (`Quality gates`) | yes |
+| svelte-crossword, jpc.finance.native, jpc-since, flashstack, phrasepack, spork, stickies, taskflow, travel, holiday-hue, stoop, jpc.eats.native, cadence-ios | no | — | — | no |
+
+No repo uses rulesets. Every protected repo needs the protected-repo bump setup below
+(`ci-workflow:` + `workflow_dispatch:`, or `DEPLOY_PAT`).
+
 ## Checklist (every repo)
 
 1. Branch from main. Replace the workflow file(s) with the caller YAML below; delete
@@ -50,6 +66,10 @@ Pilots (done, proven end to end):
   Deploy jobs are never required checks, so migrating a deploy is safe everywhere. For
   CI jobs on protected repos, update the required checks in the SAME change window:
   add the new names, merge, then drop the old names.
+- **GUI session**: `ios-release` fails fast unless `launchctl print gui/$(id -u)`
+  succeeds (no console login for the runner user = the export SIGTRAPs in AppSSO);
+  on any export failure it prints the IDEDistribution standard/critical logs and
+  xcodebuild crash reports and uploads them as `ios-export-diagnostics`.
 - **Keychain**: the unlock step is a no-op when the mini's runner hooks already
   unlocked the CI keychain (seen in the svelte-crossword pilot); keep
   `CI_KEYCHAIN_PASSWORD` until the hooks are confirmed on every lane.
@@ -216,14 +236,17 @@ green run, and for sandbox CI check the teardown deleted the stack).
 
 ## Per-repo plan
 
-### cadence (Capacitor; unprotected; also docker-publish + deploy-web)
+### cadence (Capacitor; main PROTECTED, strict, 16 required checks, auto-merge allowed; also docker-publish + deploy-web)
 - iOS: `ios-deploy-capacitor.yml` with `bundle-id: com.johncorser.cadence`,
   `archive-name: Cadence`, `external-beta: true`, `secret-env: VITE_DIAGNOSTICS_KEY VITE_DIAGNOSTICS_URL`.
   Cadence's smoke is app-specific (signs into a Jellyfin test server through
   `scripts/ios-smoke-proxy.py`, Release configuration, per-run tag), so keep it:
   `smoke-command: SMOKE_WEB_BUILD=0 SMOKE_CONFIGURATION=Release SMOKE_RUN_TAG=deploy-${{ github.run_id }}-${{ github.run_attempt }} bash scripts/ios-launch-smoke.sh`
-  and `smoke-artifact-paths: ios-smoke-output/`. Copy any env its smoke reads into
-  `secret-env`.
+  and keep the default `smoke-artifact-paths` (screenshot, logs, stdout; DerivedData and
+  `.app` bundles are always excluded). Copy any env its smoke reads into `secret-env`.
+  Being protected, its bump needs `ci-workflow: ci.yml` (+ `workflow_dispatch:` in
+  `ci.yml`) or `DEPLOY_PAT`; its required checks are CI jobs, so migrating only the
+  deploy leaves protection untouched.
 - docker-publish: `docker-publish.yml` with `image: <its current image>`; check its
   current tags/platforms match (it uses build-push v6, amd64+arm64).
 - Its CI (`quality`, `ios-tests`, `ios-launch-smoke`, `acceptance`, `smoke-live`) is
@@ -242,7 +265,7 @@ jobs:
       external-beta: true
       secret-env: VITE_DIAGNOSTICS_KEY VITE_DIAGNOSTICS_URL
       smoke-command: SMOKE_WEB_BUILD=0 SMOKE_CONFIGURATION=Release SMOKE_RUN_TAG=deploy-${{ github.run_id }}-${{ github.run_attempt }} bash scripts/ios-launch-smoke.sh
-      smoke-artifact-paths: ios-smoke-output/
+      ci-workflow: ci.yml
       bump: patch
 ```
 
@@ -307,7 +330,7 @@ jobs:
   is the generic one (SMOKE_OUT=smoke-results only differs): delete it. Its CI
   (`test`, `ios-launch`) stays as is.
 
-### pipe (native; unprotected; cloud-signed today)
+### pipe (native; main PROTECTED, strict, 4 required checks, auto-merge allowed; cloud-signed today)
 ```yaml
   deploy:
     needs: [unit-tests, crap-analysis, acceptance-tests]
@@ -330,7 +353,9 @@ jobs:
   Behavior change to verify: pipe archives UNSIGNED and cloud-signs at export today;
   the shared flow signs in the archive with the CI keychain (keeps entitlements).
   Confirm the first upload and that `pipe/Secrets.xcconfig` is not committed by the
-  bump (the bump only `git add`s the pbxproj).
+  bump (the bump only `git add`s the pbxproj). Protected: add `ci-workflow: quality-gates.yml`
+  (+ `workflow_dispatch:` there) or `DEPLOY_PAT`, and note its old `[skip ci]` push to
+  main could never have landed.
 
 ### jpc.fit.native (native + watch app; main PROTECTED, strict, 5 required checks; auto-merge bump PR)
 ```yaml
@@ -415,7 +440,7 @@ check-name change needs no protection edit.
   from the secret) and sweeps by `--pr-days 2 --days 7` (`sweep-args`).
 - jpc.eats.native: native, still writes `/tmp/ExportOptions.plist` and `~/Desktop`:
   the shared-path race. Migrate like pipe.
-- telly-apple (iOS + tvOS, xcodegen, `/tmp/ExportOptions-*.plist`): two archives per
+- telly-apple (main PROTECTED, 1 required check; iOS + tvOS, xcodegen, `/tmp/ExportOptions-*.plist`): two archives per
   run; needs `platform: tvos` and a second call, `setup-command: brew install xcodegen && xcodegen generate`.
 - cadence-ios (xcodegen, `~/Desktop` paths): native caller with `setup-command`.
 - docker-publish: pixoo-wall, jpc-homie (also deploys to umbrel over ssh), cadence,

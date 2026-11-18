@@ -59,6 +59,11 @@ inputs:
   token:
     description: Token for the bump PR
     default: ${{ github.token }}
+  require-gui-session:
+    description: >
+      'true' = fail fast unless the runner user has a GUI login session. Without one,
+      xcodebuild's App Store export/upload SIGTRAPs in AppSSO minutes later.
+    default: 'true'
 outputs:
   build-number:
     description: CFBundleVersion of the uploaded build
@@ -75,6 +80,16 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Require a GUI login session for the runner user
+      if: inputs.require-gui-session == 'true'
+      shell: bash
+      run: |
+        if ! launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+          echo "::error title=No GUI session::'$(id -un)' has no GUI login session on this Mac (console user: '$(stat -f %Su /dev/console)'). xcodebuild's App Store export crashes in AppSSO without one. Log '$(id -un)' in at the console (auto-login), then re-run."
+          exit 1
+        fi
+        echo "GUI session for $(id -un) present (console user: $(stat -f %Su /dev/console))"
+
     - name: Write App Store Connect API key (per job)
       id: key
       shell: bash
@@ -132,6 +147,15 @@ runs:
         CI_KEYCHAIN_PASSWORD: ${{ inputs.keychain-password }}
       run: bash "$GITHUB_ACTION_PATH/archive-upload.sh"
 
+    - name: Keep export diagnostics
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ios-export-diagnostics
+        path: ${{ runner.temp }}/ios-release-diagnostics/
+        retention-days: 7
+        if-no-files-found: ignore
+
     - name: Revert CI signing
       if: always()
       shell: bash
@@ -174,4 +198,4 @@ runs:
     - name: Remove signing material
       if: always()
       shell: bash
-      run: rm -rf "$RUNNER_TEMP/asc" "$RUNNER_TEMP/ios-release"
+      run: rm -rf "$RUNNER_TEMP/asc" "$RUNNER_TEMP/ios-release" "$RUNNER_TEMP/ios-release-diagnostics"

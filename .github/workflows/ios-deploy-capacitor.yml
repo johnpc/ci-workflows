@@ -86,9 +86,15 @@ on:
         type: string
         default: ''
       smoke-artifact-paths:
-        description: Evidence uploaded after smoke-command
+        description: >
+          Evidence uploaded after smoke-command (DerivedData and .app bundles are
+          always excluded, whatever is listed here)
         type: string
-        default: ios-smoke-output/
+        default: |
+          ios-smoke-output/*.png
+          ios-smoke-output/*.log
+          ios-smoke-output/*.stdout
+          ios-smoke-output/*.txt
       smoke-remove-pods:
         description: Pods left out of the simulator smoke build (no arm64 simulator slice), e.g. CapacitorMlkitBarcodeScanning
         type: string
@@ -269,7 +275,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ios-launch-smoke
-          path: ${{ inputs.smoke-artifact-paths }}
+          path: |
+            ${{ inputs.smoke-artifact-paths }}
+            !**/DerivedData/**
+            !**/*.app/**
           if-no-files-found: ignore
 
       - uses: johnpc/ci-workflows/actions/ios-release@v1
