@@ -89,6 +89,11 @@ on:
         required: true
       CI_KEYCHAIN_PASSWORD:
         required: false
+      DEPLOY_PAT:
+        description: >
+          Optional token (PAT / app token) for checkout, the bump branch and the bump PR.
+          A PR it opens triggers CI on its own, which GITHUB_TOKEN PRs do not.
+        required: false
     outputs:
       version:
         description: Marketing version uploaded
@@ -116,6 +121,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.ref }}
+          token: ${{ secrets.DEPLOY_PAT || github.token }}
 
       - uses: johnpc/ci-workflows/actions/export-secrets@v1
         with:
@@ -145,3 +151,4 @@ jobs:
           asc-issuer-id: ${{ secrets.ASC_ISSUER_ID }}
           asc-key-content: ${{ secrets.ASC_KEY_CONTENT }}
           keychain-password: ${{ secrets.CI_KEYCHAIN_PASSWORD }}
+          token: ${{ secrets.DEPLOY_PAT || github.token }}

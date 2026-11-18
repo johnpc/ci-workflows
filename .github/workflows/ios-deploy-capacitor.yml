@@ -78,6 +78,17 @@ on:
       smoke:
         type: boolean
         default: true
+      smoke-command:
+        description: >
+          Run this repo-specific launch smoke instead of the shared one (e.g. one that
+          signs in against a test backend). It must fail the job when the app does not
+          launch.
+        type: string
+        default: ''
+      smoke-artifact-paths:
+        description: Evidence uploaded after smoke-command
+        type: string
+        default: ios-smoke-output/
       smoke-remove-pods:
         description: Pods left out of the simulator smoke build (no arm64 simulator slice), e.g. CapacitorMlkitBarcodeScanning
         type: string
@@ -109,6 +120,11 @@ on:
       ASC_KEY_CONTENT:
         required: true
       CI_KEYCHAIN_PASSWORD:
+        required: false
+      DEPLOY_PAT:
+        description: >
+          Optional token (PAT / app token) for checkout, the bump branch and the bump PR.
+          A PR it opens triggers CI on its own, which GITHUB_TOKEN PRs do not.
         required: false
       AMPLIFY_OUTPUTS_BASE64:
         required: false
@@ -147,6 +163,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.ref }}
+          token: ${{ secrets.DEPLOY_PAT || github.token }}
           fetch-depth: ${{ inputs.change-paths != '' && 2 || 1 }}
 
       - name: Detect native-relevant changes
@@ -237,11 +254,23 @@ jobs:
           echo "project=$PROJ workspace=${WS:-<none>}"
 
       - uses: johnpc/ci-workflows/actions/ios-launch-smoke@v1
-        if: steps.changes.outputs.deploy == 'true' && inputs.smoke
+        if: steps.changes.outputs.deploy == 'true' && inputs.smoke && inputs.smoke-command == ''
         with:
           ios-dir: ${{ inputs.ios-dir }}
           scheme: ${{ inputs.scheme }}
           remove-pods: ${{ inputs.smoke-remove-pods }}
+
+      - name: Launch smoke (repo-specific)
+        if: steps.changes.outputs.deploy == 'true' && inputs.smoke && inputs.smoke-command != ''
+        run: ${{ inputs.smoke-command }}
+
+      - name: Keep the launch-smoke evidence
+        if: always() && steps.changes.outputs.deploy == 'true' && inputs.smoke && inputs.smoke-command != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-launch-smoke
+          path: ${{ inputs.smoke-artifact-paths }}
+          if-no-files-found: ignore
 
       - uses: johnpc/ci-workflows/actions/ios-release@v1
         if: steps.changes.outputs.deploy == 'true'
@@ -260,3 +289,4 @@ jobs:
           asc-issuer-id: ${{ secrets.ASC_ISSUER_ID }}
           asc-key-content: ${{ secrets.ASC_KEY_CONTENT }}
           keychain-password: ${{ secrets.CI_KEYCHAIN_PASSWORD }}
+          token: ${{ secrets.DEPLOY_PAT || github.token }}

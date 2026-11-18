@@ -1,0 +1,4 @@
+self-hosted-runner:
+  labels:
+    - mac-mini
+    - mac-mini-light
