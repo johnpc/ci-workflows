@@ -30,6 +30,9 @@ inputs:
   token:
     description: Token for git push and gh (needs contents, pull-requests and actions write)
     default: ${{ github.token }}
+  rebase:
+    description: "'true' = rebase the bump onto the current base before pushing"
+    default: 'true'
 outputs:
   pr-url:
     description: URL of the bump PR ('' when it fell back to a direct push)
@@ -47,4 +50,5 @@ runs:
         BUILD_NUM_INPUT: ${{ inputs.build-number }}
         BASE_INPUT: ${{ inputs.base }}
         CI_WORKFLOW: ${{ inputs.ci-workflow }}
+        BUMP_REBASE: ${{ inputs.rebase }}
       run: bash "$GITHUB_ACTION_PATH/bump-pr.sh"

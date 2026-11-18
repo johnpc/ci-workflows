@@ -28,6 +28,24 @@ git commit -m "$TITLE"
 
 BODY="Automated by the iOS deploy (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}): ${OLD_VERSION} already exists in App Store Connect, so build ${BUILD_NUM} was uploaded as ${NEW_VERSION}. This PR records that bump."
 
+# Base the bump on the CURRENT base branch. If main moved during the deploy, a branch
+# cut from the old commit is behind, and when the move touched .github/workflows,
+# GitHub refuses GITHUB_TOKEN's push of it outright ("refusing to allow a GitHub App
+# to create or update workflow ... without workflows permission").
+if [ "${BUMP_REBASE:-true}" = "true" ]; then
+  git fetch -q --deepen=100 origin 2>/dev/null || true
+  git fetch -q origin "$BASE"
+  if ! git merge-base --is-ancestor "origin/$BASE" HEAD; then
+    if git rebase -q "origin/$BASE"; then
+      echo "rebased the bump onto the current $BASE ($(git rev-parse --short "origin/$BASE"))"
+    else
+      git rebase --abort || true
+      echo "::error::the bump to $NEW_VERSION (build $BUILD_NUM) conflicts with the current $BASE; it is uploaded but NOT recorded in git. Set MARKETING_VERSION = $NEW_VERSION by hand."
+      exit 1
+    fi
+  fi
+fi
+
 if ! git push -f -u origin "$BRANCH"; then
   echo "::error::could not push $BRANCH; the bump to $NEW_VERSION (build $BUILD_NUM) is uploaded but NOT recorded in git"
   exit 1
