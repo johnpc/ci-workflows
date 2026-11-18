@@ -1,0 +1,50 @@
+name: Record a version bump through an auto-merging PR
+description: >
+  Commit the given files on ci/bump-version-<version>, open a PR against the default
+  branch and have it merge itself: auto-merge when the branch is protected (with an
+  optional workflow_dispatch of the CI workflow so the required checks exist on the
+  bot's commit), or an immediate squash merge when it is not. Never pushes to a
+  protected branch. The PR body names the build number ($BUILD_NUM from GITHUB_ENV).
+inputs:
+  files:
+    description: Space-separated paths to commit
+    required: true
+  old-version:
+    description: Version that already existed in App Store Connect
+    required: true
+  new-version:
+    description: Version the build was uploaded as
+    required: true
+  build-number:
+    description: Build number ('' = $BUILD_NUM from the job environment)
+    default: ''
+  base:
+    description: Base branch ('' = the repository default branch)
+    default: ''
+  ci-workflow:
+    description: >
+      Workflow file to dispatch on the bump branch so required checks run (a PR opened
+      with GITHUB_TOKEN triggers no pull_request workflows). The workflow needs a
+      workflow_dispatch trigger. '' = do not dispatch.
+    default: ''
+  token:
+    description: Token for git push and gh (needs contents, pull-requests and actions write)
+    default: ${{ github.token }}
+outputs:
+  pr-url:
+    description: URL of the bump PR ('' when it fell back to a direct push)
+    value: ${{ steps.bump.outputs.pr-url }}
+runs:
+  using: composite
+  steps:
+    - id: bump
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        FILES: ${{ inputs.files }}
+        OLD_VERSION: ${{ inputs.old-version }}
+        NEW_VERSION: ${{ inputs.new-version }}
+        BUILD_NUM_INPUT: ${{ inputs.build-number }}
+        BASE_INPUT: ${{ inputs.base }}
+        CI_WORKFLOW: ${{ inputs.ci-workflow }}
+      run: bash "$GITHUB_ACTION_PATH/bump-pr.sh"

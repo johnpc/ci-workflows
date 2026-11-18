@@ -1,0 +1,166 @@
+name: Android deploy (Capacitor)
+
+# Reusable: build a Capacitor app's web bundle, sync it into android/, build the
+# debug APK (no release keystore is configured in these repos) and publish it as a
+# GitHub Release. Skips when the last commit touches nothing native-relevant.
+#
+#   jobs:
+#     deploy:
+#       if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+#       uses: johnpc/ci-workflows/.github/workflows/android-deploy-capacitor.yml@v1
+#       secrets: inherit
+#       with:
+#         app-name: spork
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: APK file name stem and release title
+        type: string
+        required: true
+      ref:
+        type: string
+        default: ''
+      change-paths:
+        description: Extended regex of native-relevant paths ('' = always deploy)
+        type: string
+        default: '^(src/|public/|android/|index\.html|vite\.config\.ts|capacitor\.config\.ts|tsconfig|package(-lock)?\.json)'
+      node-version:
+        type: string
+        default: '26'
+      npm-ci-args:
+        type: string
+        default: ''
+      config-command:
+        description: Command that produces the app config after the AWS profile is written (e.g. npm run prod-config)
+        type: string
+        default: ''
+      build-command:
+        type: string
+        default: npm run build
+      secret-env:
+        description: "Names of caller secrets exported as env for the config and build steps (needs secrets: inherit)"
+        type: string
+        default: ''
+      java-version:
+        description: Capacitor 8 compiles with sourceCompatibility 21
+        type: string
+        default: '21'
+      gradle-task:
+        type: string
+        default: assembleDebug
+      apk-path:
+        type: string
+        default: android/app/build/outputs/apk/debug/app-debug.apk
+      runner:
+        type: string
+        default: '"ubuntu-latest"'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+
+jobs:
+  deploy:
+    name: Build & publish Android APK
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    concurrency:
+      group: android-deploy-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 2
+
+      - name: Detect native-relevant changes
+        id: changes
+        env:
+          CHANGE_PATHS: ${{ inputs.change-paths }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$CHANGE_PATHS" ] || [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if ! BASE=$(git rev-parse -q --verify HEAD^); then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          echo "changed files:"; echo "$CHANGED"
+          if echo "$CHANGED" | grep -qE "$CHANGE_PATHS"; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no native-relevant changes; skipping the Android deploy"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v6
+        if: steps.changes.outputs.deploy == 'true'
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.changes.outputs.deploy == 'true'
+        env:
+          NPM_CI_ARGS: ${{ inputs.npm-ci-args }}
+        run: |
+          # shellcheck disable=SC2086  # NPM_CI_ARGS is a list of flags
+          npm ci $NPM_CI_ARGS
+
+      - uses: johnpc/ci-workflows/actions/aws-profile@v1
+        if: steps.changes.outputs.deploy == 'true'
+        with:
+          access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - uses: johnpc/ci-workflows/actions/export-secrets@v1
+        if: steps.changes.outputs.deploy == 'true'
+        with:
+          names: ${{ inputs.secret-env }}
+          secrets-json: ${{ toJSON(secrets) }}
+
+      - name: Generate the app config
+        if: steps.changes.outputs.deploy == 'true' && inputs.config-command != ''
+        run: ${{ inputs.config-command }}
+
+      - name: Build the web app and sync it into Capacitor Android
+        if: steps.changes.outputs.deploy == 'true'
+        run: |
+          ${{ inputs.build-command }}
+          npx cap sync android
+
+      - uses: actions/setup-java@v5
+        if: steps.changes.outputs.deploy == 'true'
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      - name: Build the APK
+        if: steps.changes.outputs.deploy == 'true'
+        working-directory: android
+        env:
+          TASK: ${{ inputs.gradle-task }}
+        run: ./gradlew "$TASK"
+
+      - name: Stage the APK and compute the release tag
+        if: steps.changes.outputs.deploy == 'true'
+        id: tag
+        env:
+          APK: ${{ inputs.apk-path }}
+          NAME: ${{ inputs.app-name }}
+        run: |
+          cp "$APK" "$NAME.apk"
+          echo "tag=android-$(date +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the APK as a GitHub Release
+        if: steps.changes.outputs.deploy == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ inputs.app-name }} Android ${{ steps.tag.outputs.tag }}
+          files: ${{ inputs.app-name }}.apk
+          make_latest: true

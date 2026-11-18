@@ -1,0 +1,71 @@
+name: CI-keychain manual signing
+description: >
+  Switch every signable target's Release config to manual signing with the Mac mini
+  CI keychain's Apple Distribution identity and a per-bundle "<bundle id> CI AppStore"
+  profile (created/refreshed through the App Store Connect API), or revert that
+  switch byte for byte. Runner jobs run in the system launchd context, where Xcode's
+  automatic signing can neither see nor write a keychain. Signing in the archive
+  (instead of cloud-signing an unsigned archive) keeps the app's entitlements.
+inputs:
+  mode:
+    description: apply | revert
+    required: true
+  project:
+    description: Path to the .xcodeproj
+    required: true
+  export-options:
+    description: Where apply writes ExportOptions.plist (use a $RUNNER_TEMP path)
+    default: ''
+  destination:
+    description: ExportOptions destination (upload | export)
+    default: upload
+  platform:
+    description: Profile platform (ios | tvos)
+    default: ios
+  profiles:
+    description: >
+      Newline-separated BUNDLE_ID=PROFILE_NAME pins to existing installed profiles
+      (for capabilities an API-created profile cannot carry, e.g. FinanceKit).
+    default: ''
+  asc-key-path:
+    description: Path of the App Store Connect API key (.p8)
+    default: ''
+  asc-key-id:
+    description: App Store Connect API key id
+    default: ''
+  asc-issuer-id:
+    description: App Store Connect issuer id
+    default: ''
+  keychain-password:
+    description: CI keychain password (only used when a new team certificate must be imported)
+    default: ''
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        PROJECT: ${{ inputs.project }}
+        EXPORT_OPTIONS: ${{ inputs.export-options }}
+        DESTINATION: ${{ inputs.destination }}
+        PLATFORM: ${{ inputs.platform }}
+        PROFILES: ${{ inputs.profiles }}
+        ASC_KEY_PATH: ${{ inputs.asc-key-path }}
+        ASC_KEY_ID: ${{ inputs.asc-key-id }}
+        ASC_ISSUER_ID: ${{ inputs.asc-issuer-id }}
+        CI_KEYCHAIN_PASSWORD: ${{ inputs.keychain-password }}
+      run: |
+        set -euo pipefail
+        HELPER="$GITHUB_ACTION_PATH/ios_manual_signing.py"
+        if [ "$MODE" = "revert" ]; then
+          python3 -B "$HELPER" revert "$PROJECT"
+          exit 0
+        fi
+        [ "$MODE" = "apply" ] || { echo "::error::mode must be apply or revert"; exit 1; }
+        ARGS=(apply "$PROJECT" --destination "$DESTINATION" --platform "$PLATFORM")
+        [ -z "$EXPORT_OPTIONS" ] || ARGS+=(--export-options "$EXPORT_OPTIONS")
+        while IFS= read -r pin; do
+          pin="$(echo "$pin" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          [ -z "$pin" ] || ARGS+=(--profile "$pin")
+        done <<< "$PROFILES"
+        python3 -B "$HELPER" "${ARGS[@]}"

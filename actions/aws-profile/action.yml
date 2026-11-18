@@ -1,0 +1,34 @@
+name: AWS named profile
+description: >
+  Write an AWS named profile (default "personal", the name every repo's npm scripts
+  pass to ampx) from access-key secrets. No-op with a notice when the key is empty.
+inputs:
+  access-key-id:
+    description: AWS access key id
+    default: ''
+  secret-access-key:
+    description: AWS secret access key
+    default: ''
+  profile:
+    description: Profile name
+    default: personal
+  region:
+    description: Region
+    default: us-west-2
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        AWS_KEY: ${{ inputs.access-key-id }}
+        AWS_SECRET: ${{ inputs.secret-access-key }}
+        PROFILE: ${{ inputs.profile }}
+        REGION: ${{ inputs.region }}
+      run: |
+        set -euo pipefail
+        if [ -z "$AWS_KEY" ]; then echo "::notice::no AWS credentials given; skipping the $PROFILE profile"; exit 0; fi
+        mkdir -p ~/.aws
+        ( umask 077
+          printf '[%s]\naws_access_key_id=%s\naws_secret_access_key=%s\n' "$PROFILE" "$AWS_KEY" "$AWS_SECRET" > ~/.aws/credentials
+          printf '[profile %s]\nregion=%s\n' "$PROFILE" "$REGION" > ~/.aws/config )
+        echo "wrote AWS profile $PROFILE ($REGION)"

@@ -1,0 +1,262 @@
+name: iOS deploy (Capacitor)
+
+# Reusable: build a Capacitor app's web bundle, sync it into ios/App, prove the
+# real binary launches in a fresh simulator (ios-launch-smoke), then sign from the
+# Mac mini CI keychain, archive, upload to App Store Connect (bumping the version
+# through an auto-merging PR when it already exists) and optionally hand the build
+# to external TestFlight groups. Never submits for App Store review.
+#
+#   jobs:
+#     deploy:
+#       if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+#       uses: johnpc/ci-workflows/.github/workflows/ios-deploy-capacitor.yml@v1
+#       secrets: inherit
+#       with:
+#         bundle-id: com.example.app
+on:
+  workflow_call:
+    inputs:
+      bundle-id:
+        description: App bundle id (launch smoke + external beta)
+        type: string
+        required: true
+      scheme:
+        type: string
+        default: App
+      ios-dir:
+        description: Capacitor iOS project directory
+        type: string
+        default: ios/App
+      workspace:
+        description: "'' = <ios-dir>/App.xcworkspace when a Podfile exists, else archive the project"
+        type: string
+        default: ''
+      project:
+        description: "'' = <ios-dir>/App.xcodeproj"
+        type: string
+        default: ''
+      archive-name:
+        type: string
+        default: ''
+      bump:
+        description: Version part bumped when the version already exists (patch | minor)
+        type: string
+        default: patch
+      ref:
+        description: Ref to deploy ('' = the triggering commit)
+        type: string
+        default: ''
+      change-paths:
+        description: >
+          Extended regex of paths that affect the native app. When set, a deploy whose
+          last commit touches none of them is skipped (manual dispatch always deploys).
+        type: string
+        default: ''
+      node-version:
+        type: string
+        default: '26'
+      npm-ci-args:
+        description: e.g. --legacy-peer-deps
+        type: string
+        default: ''
+      amplify-outputs-path:
+        description: Where to decode secrets.AMPLIFY_OUTPUTS_BASE64 ('' = skip)
+        type: string
+        default: ''
+      config-command:
+        description: Command that produces the app config, run after the AWS profile is written (e.g. npm run prod-config)
+        type: string
+        default: ''
+      build-command:
+        description: Web build command
+        type: string
+        default: npm run build
+      secret-env:
+        description: "Names of caller secrets to export as env for the config and build steps (needs secrets: inherit)"
+        type: string
+        default: ''
+      smoke:
+        type: boolean
+        default: true
+      smoke-remove-pods:
+        description: Pods left out of the simulator smoke build (no arm64 simulator slice), e.g. CapacitorMlkitBarcodeScanning
+        type: string
+        default: ''
+      profiles:
+        description: Newline-separated BUNDLE_ID=PROFILE_NAME pins to existing installed profiles
+        type: string
+        default: ''
+      external-beta:
+        description: Attach the build to every external TestFlight group
+        type: boolean
+        default: false
+      ci-workflow:
+        description: CI workflow file to dispatch on a bump PR branch so required checks run (protected repos)
+        type: string
+        default: ''
+      runner:
+        description: JSON runs-on value
+        type: string
+        default: '["self-hosted", "mac-mini"]'
+      timeout-minutes:
+        type: number
+        default: 60
+    secrets:
+      ASC_KEY_ID:
+        required: true
+      ASC_ISSUER_ID:
+        required: true
+      ASC_KEY_CONTENT:
+        required: true
+      CI_KEYCHAIN_PASSWORD:
+        required: false
+      AMPLIFY_OUTPUTS_BASE64:
+        required: false
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+    outputs:
+      version:
+        description: Marketing version uploaded
+        value: ${{ jobs.deploy.outputs.version }}
+      build-number:
+        description: Build number uploaded
+        value: ${{ jobs.deploy.outputs.build-number }}
+
+jobs:
+  deploy:
+    name: Deploy to App Store Connect
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # One deploy per repo at a time: a manual dispatch landing next to the automatic
+    # run queues instead of uploading a duplicate build for the same commit.
+    concurrency:
+      group: ios-deploy-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      build-number: ${{ steps.release.outputs.build-number }}
+    env:
+      IOS_DIR: ${{ inputs.ios-dir }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: ${{ inputs.change-paths != '' && 2 || 1 }}
+
+      - name: Detect native-relevant changes
+        id: changes
+        env:
+          CHANGE_PATHS: ${{ inputs.change-paths }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$CHANGE_PATHS" ] || [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if ! BASE=$(git rev-parse -q --verify HEAD^); then
+            echo "no parent commit: deploy (fail-safe)"; echo "deploy=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
+          echo "changed files:"; echo "$CHANGED"
+          if echo "$CHANGED" | grep -qE "$CHANGE_PATHS"; then
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no native-relevant changes; skipping the iOS deploy"
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v6
+        if: steps.changes.outputs.deploy == 'true'
+        with:
+          node-version: ${{ inputs.node-version }}
+          # No setup-node cache on the self-hosted Mac mini: ~/.npm persists there,
+          # and saving it was a ~1.8 GB upload per run.
+          package-manager-cache: false
+
+      - name: Install dependencies
+        if: steps.changes.outputs.deploy == 'true'
+        env:
+          NPM_CI_ARGS: ${{ inputs.npm-ci-args }}
+        run: |
+          # shellcheck disable=SC2086  # NPM_CI_ARGS is a list of flags
+          npm ci $NPM_CI_ARGS
+
+      - uses: johnpc/ci-workflows/actions/aws-profile@v1
+        if: steps.changes.outputs.deploy == 'true'
+        with:
+          access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - uses: johnpc/ci-workflows/actions/export-secrets@v1
+        if: steps.changes.outputs.deploy == 'true'
+        with:
+          names: ${{ inputs.secret-env }}
+          secrets-json: ${{ toJSON(secrets) }}
+
+      - name: Provide amplify_outputs.json
+        if: steps.changes.outputs.deploy == 'true' && inputs.amplify-outputs-path != ''
+        env:
+          AMPLIFY_OUTPUTS_BASE64: ${{ secrets.AMPLIFY_OUTPUTS_BASE64 }}
+          OUT: ${{ inputs.amplify-outputs-path }}
+        run: |
+          [ -n "$AMPLIFY_OUTPUTS_BASE64" ] || { echo "::error::AMPLIFY_OUTPUTS_BASE64 secret is missing"; exit 1; }
+          echo "$AMPLIFY_OUTPUTS_BASE64" | base64 -d > "$OUT"
+
+      - name: Generate the app config
+        if: steps.changes.outputs.deploy == 'true' && inputs.config-command != ''
+        run: ${{ inputs.config-command }}
+
+      - name: Build the web app and sync it into Capacitor iOS
+        if: steps.changes.outputs.deploy == 'true'
+        run: |
+          ${{ inputs.build-command }}
+          npx cap sync ios
+
+      - name: Install CocoaPods
+        if: steps.changes.outputs.deploy == 'true' && hashFiles(format('{0}/Podfile', inputs.ios-dir)) != ''
+        # cap sync may already run it; run it explicitly so a missing spec repo fails
+        # loudly here, not mid-archive.
+        run: cd "$IOS_DIR" && pod install
+
+      - name: Resolve the Xcode container
+        if: steps.changes.outputs.deploy == 'true'
+        id: xc
+        env:
+          WS: ${{ inputs.workspace }}
+          PROJ: ${{ inputs.project }}
+        run: |
+          PROJ="${PROJ:-$IOS_DIR/App.xcodeproj}"
+          if [ -z "$WS" ] && [ -f "$IOS_DIR/Podfile" ]; then WS="$IOS_DIR/App.xcworkspace"; fi
+          echo "project=$PROJ" >> "$GITHUB_OUTPUT"
+          echo "workspace=$WS" >> "$GITHUB_OUTPUT"
+          echo "project=$PROJ workspace=${WS:-<none>}"
+
+      - uses: johnpc/ci-workflows/actions/ios-launch-smoke@v1
+        if: steps.changes.outputs.deploy == 'true' && inputs.smoke
+        with:
+          ios-dir: ${{ inputs.ios-dir }}
+          scheme: ${{ inputs.scheme }}
+          remove-pods: ${{ inputs.smoke-remove-pods }}
+
+      - uses: johnpc/ci-workflows/actions/ios-release@v1
+        if: steps.changes.outputs.deploy == 'true'
+        id: release
+        with:
+          project: ${{ steps.xc.outputs.project }}
+          workspace: ${{ steps.xc.outputs.workspace }}
+          scheme: ${{ inputs.scheme }}
+          archive-name: ${{ inputs.archive-name }}
+          profiles: ${{ inputs.profiles }}
+          bump: ${{ inputs.bump }}
+          bundle-id: ${{ inputs.bundle-id }}
+          external-beta: ${{ inputs.external-beta }}
+          ci-workflow: ${{ inputs.ci-workflow }}
+          asc-key-id: ${{ secrets.ASC_KEY_ID }}
+          asc-issuer-id: ${{ secrets.ASC_ISSUER_ID }}
+          asc-key-content: ${{ secrets.ASC_KEY_CONTENT }}
+          keychain-password: ${{ secrets.CI_KEYCHAIN_PASSWORD }}

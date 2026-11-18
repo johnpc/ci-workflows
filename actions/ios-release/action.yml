@@ -1,0 +1,177 @@
+name: iOS release (sign, archive, upload, bump)
+description: >
+  On the Mac mini: write the App Store Connect key to this job's $RUNNER_TEMP, stamp a
+  unique build number (exported as BUILD_NUM), unlock the CI keychain (no-op when
+  already unlocked), sign manually from the CI keychain, archive, export and upload.
+  If the marketing version already exists in App Store Connect it bumps (patch or
+  minor), uploads that build, and records the bump through an auto-merging PR.
+  Optionally hands the build to external TestFlight groups. Never submits for App
+  Store review.
+inputs:
+  project:
+    description: Path to the .xcodeproj (signing + version live here)
+    required: true
+  workspace:
+    description: Path to the .xcworkspace to archive ('' = archive the project)
+    default: ''
+  scheme:
+    description: Scheme to archive
+    required: true
+  archive-name:
+    description: Archive file name ('' = scheme)
+    default: ''
+  destination:
+    description: xcodebuild archive destination
+    default: generic/platform=iOS
+  platform:
+    description: Provisioning profile platform (ios | tvos)
+    default: ios
+  xcodebuild-args:
+    description: Extra arguments for xcodebuild archive (word-split)
+    default: ''
+  profiles:
+    description: Newline-separated BUNDLE_ID=PROFILE_NAME pins to existing installed profiles
+    default: ''
+  bump:
+    description: Version part to bump when the version already exists (patch | minor)
+    default: patch
+  bundle-id:
+    description: Bundle id (only needed for external-beta)
+    default: ''
+  external-beta:
+    description: "'true' = attach the build to every external TestFlight group"
+    default: 'false'
+  ci-workflow:
+    description: CI workflow file to dispatch on a bump PR branch (protected repos), '' = none
+    default: ''
+  asc-key-id:
+    required: true
+    description: App Store Connect API key id
+  asc-issuer-id:
+    required: true
+    description: App Store Connect issuer id
+  asc-key-content:
+    required: true
+    description: App Store Connect API private key (.p8 contents)
+  keychain-password:
+    description: CI keychain password (used only when the keychain is locked)
+    default: ''
+  token:
+    description: Token for the bump PR
+    default: ${{ github.token }}
+outputs:
+  build-number:
+    description: CFBundleVersion of the uploaded build
+    value: ${{ steps.build.outputs.number }}
+  version:
+    description: Marketing version the build was uploaded as
+    value: ${{ steps.result.outputs.version }}
+  bumped:
+    description: "'true' when the version was bumped"
+    value: ${{ steps.upload.outputs.bumped }}
+  bump-pr:
+    description: URL of the bump PR
+    value: ${{ steps.bumppr.outputs.pr-url }}
+runs:
+  using: composite
+  steps:
+    - name: Write App Store Connect API key (per job)
+      id: key
+      shell: bash
+      env:
+        ASC_KEY_ID: ${{ inputs.asc-key-id }}
+        ASC_KEY_CONTENT: ${{ inputs.asc-key-content }}
+      run: |
+        # Per-job $RUNNER_TEMP, never the shared ~/private_keys (another app's
+        # cleanup deleted it mid-export) nor a hard-coded /Users/runner path.
+        set -euo pipefail
+        [ -n "$ASC_KEY_ID" ] && [ -n "$ASC_KEY_CONTENT" ] || { echo "::error::ASC_KEY_ID / ASC_KEY_CONTENT secrets are missing"; exit 1; }
+        DIR="$RUNNER_TEMP/asc"; mkdir -p "$DIR"; chmod 700 "$DIR"
+        KEY="$DIR/AuthKey_${ASC_KEY_ID}.p8"
+        ( umask 077; printf '%s\n' "$ASC_KEY_CONTENT" > "$KEY" )
+        grep -q "BEGIN PRIVATE KEY" "$KEY" || { echo "::error::ASC_KEY_CONTENT is not a .p8 private key"; exit 1; }
+        echo "path=$KEY" >> "$GITHUB_OUTPUT"
+
+    - name: Stamp a unique build number
+      id: build
+      shell: bash
+      env:
+        PROJECT: ${{ inputs.project }}
+      run: |
+        set -euo pipefail
+        BUILD_NUM=$(date +%Y%m%d%H%M%S)
+        (cd "$(dirname "$PROJECT")" && agvtool new-version -all "$BUILD_NUM" >/dev/null)
+        echo "build number $BUILD_NUM"
+        # Exported so later steps (bump PR body, external beta) name this exact build.
+        echo "BUILD_NUM=$BUILD_NUM" >> "$GITHUB_ENV"
+        echo "number=$BUILD_NUM" >> "$GITHUB_OUTPUT"
+
+    - name: Unlock the CI signing keychain (no-op when already unlocked)
+      shell: bash
+      env:
+        CI_KEYCHAIN_PASSWORD: ${{ inputs.keychain-password }}
+      run: bash "$GITHUB_ACTION_PATH/../keychain-unlock/unlock.sh"
+
+    - name: Sign, archive and upload (bump the version on conflict)
+      id: upload
+      shell: bash
+      env:
+        ACTION_ROOT: ${{ github.action_path }}/..
+        PROJECT: ${{ inputs.project }}
+        WORKSPACE: ${{ inputs.workspace }}
+        SCHEME: ${{ inputs.scheme }}
+        ARCHIVE_NAME: ${{ inputs.archive-name }}
+        DESTINATION: ${{ inputs.destination }}
+        PLATFORM: ${{ inputs.platform }}
+        XCODEBUILD_ARGS: ${{ inputs.xcodebuild-args }}
+        PROFILES: ${{ inputs.profiles }}
+        BUMP: ${{ inputs.bump }}
+        ASC_KEY_PATH: ${{ steps.key.outputs.path }}
+        ASC_KEY_ID: ${{ inputs.asc-key-id }}
+        ASC_ISSUER_ID: ${{ inputs.asc-issuer-id }}
+        CI_KEYCHAIN_PASSWORD: ${{ inputs.keychain-password }}
+      run: bash "$GITHUB_ACTION_PATH/archive-upload.sh"
+
+    - name: Revert CI signing
+      if: always()
+      shell: bash
+      env:
+        PROJECT: ${{ inputs.project }}
+      run: python3 -B "$GITHUB_ACTION_PATH/../ios-signing/ios_manual_signing.py" revert "$PROJECT"
+
+    - name: Record the version bump (auto-merging PR)
+      id: bumppr
+      if: steps.upload.outputs.bumped == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        FILES: ${{ steps.upload.outputs.files }}
+        OLD_VERSION: ${{ steps.upload.outputs.old-version }}
+        NEW_VERSION: ${{ steps.upload.outputs.new-version }}
+        CI_WORKFLOW: ${{ inputs.ci-workflow }}
+      run: bash "$GITHUB_ACTION_PATH/../version-bump-pr/bump-pr.sh"
+
+    - name: Report the uploaded version
+      id: result
+      shell: bash
+      env:
+        PROJECT: ${{ inputs.project }}
+      run: |
+        V=$(grep -m 1 'MARKETING_VERSION' "$PROJECT/project.pbxproj" | sed 's/.*= *\(.*\);/\1/; s/"//g')
+        echo "version=$V" >> "$GITHUB_OUTPUT"
+        echo "### Uploaded $V ($BUILD_NUM) to App Store Connect" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Distribute to external beta testers
+      if: inputs.external-beta == 'true'
+      shell: bash
+      env:
+        BUNDLE_ID: ${{ inputs.bundle-id }}
+        ASC_KEY_PATH: ${{ steps.key.outputs.path }}
+        ASC_KEY_ID: ${{ inputs.asc-key-id }}
+        ASC_ISSUER_ID: ${{ inputs.asc-issuer-id }}
+      run: python3 -B "$GITHUB_ACTION_PATH/external_beta.py"
+
+    - name: Remove signing material
+      if: always()
+      shell: bash
+      run: rm -rf "$RUNNER_TEMP/asc" "$RUNNER_TEMP/ios-release"

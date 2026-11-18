@@ -1,0 +1,27 @@
+name: Unlock the CI signing keychain
+description: >
+  Make sure the Mac mini's CI signing keychain is unlocked for this job. A no-op when
+  it is already unlocked (the mini's runner hooks unlock it per job); otherwise it
+  unlocks with the given password. Also fails clearly if the keychain is missing
+  from the search list the runner's system launchd context uses.
+inputs:
+  keychain:
+    description: Keychain path ('' = ~/Library/Keychains/ci-signing.keychain-db)
+    default: ''
+  password:
+    description: Keychain password (pass secrets.CI_KEYCHAIN_PASSWORD); only needed when it is locked
+    default: ''
+  user-session:
+    description: >
+      'true' = also unlock it in the logged-in user's security session (needed only
+      when a later step runs xcodebuild through `launchctl asuser`).
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        KC_INPUT: ${{ inputs.keychain }}
+        CI_KEYCHAIN_PASSWORD: ${{ inputs.password }}
+        USER_SESSION: ${{ inputs.user-session }}
+      run: bash "$GITHUB_ACTION_PATH/unlock.sh"

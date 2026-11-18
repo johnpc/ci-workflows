@@ -1,0 +1,67 @@
+name: iOS launch smoke
+description: >
+  Build the Capacitor iOS app for a fresh simulator, launch the real binary and fail
+  unless it starts, logs "WebView loaded", stays alive and shows no UIScene fault or
+  crash. Catches iOS 27 SDK builds that archive and upload fine but die on their
+  first frame (no UIApplicationSceneManifest). Uploads the screenshot and logs.
+inputs:
+  ios-dir:
+    description: Directory holding the Podfile / App.xcodeproj
+    default: ios/App
+  scheme:
+    description: Xcode scheme to build
+    default: App
+  bundle-id:
+    description: Bundle id to launch (default read from capacitor.config.json, then the built Info.plist)
+    default: ''
+  web-build:
+    description: 'true = run the web build + cap sync first; false = reuse the synced bundle'
+    default: 'false'
+  web-build-command:
+    description: Web build command used when web-build is true
+    default: npm run build
+  remove-pods:
+    description: >
+      Space-separated pod names to leave out of a scratch copy of the iOS project for
+      the simulator build (pods with no arm64 simulator slice, e.g.
+      CapacitorMlkitBarcodeScanning). The shipped project is never touched.
+    default: ''
+  load-secs:
+    description: Seconds to wait for "WebView loaded"
+    default: '120'
+  alive-secs:
+    description: Seconds the app must stay alive after launch
+    default: '20'
+  output-dir:
+    description: Where the screenshot and logs land
+    default: ios-smoke-output
+  artifact-name:
+    description: Name of the uploaded evidence artifact ('' = do not upload)
+    default: ios-launch-smoke
+runs:
+  using: composite
+  steps:
+    - name: Launch smoke (the built app must start in a simulator)
+      shell: bash
+      env:
+        SMOKE_IOS_DIR: ${{ inputs.ios-dir }}
+        SMOKE_SCHEME: ${{ inputs.scheme }}
+        SMOKE_BUNDLE_ID: ${{ inputs.bundle-id }}
+        SMOKE_WEB_BUILD: ${{ inputs.web-build == 'true' && '1' || '0' }}
+        SMOKE_WEB_BUILD_CMD: ${{ inputs.web-build-command }}
+        SMOKE_REMOVE_PODS: ${{ inputs.remove-pods }}
+        SMOKE_LOAD_SECS: ${{ inputs.load-secs }}
+        SMOKE_ALIVE_SECS: ${{ inputs.alive-secs }}
+        SMOKE_OUT: ${{ inputs.output-dir }}
+      run: bash "$GITHUB_ACTION_PATH/ios-launch-smoke.sh"
+    - name: Keep the launch-smoke evidence
+      if: always() && inputs.artifact-name != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ inputs.output-dir }}/launch.png
+          ${{ inputs.output-dir }}/app.stdout
+          ${{ inputs.output-dir }}/xcodebuild.log
+          ${{ inputs.output-dir }}/pod-install.log
+        if-no-files-found: ignore

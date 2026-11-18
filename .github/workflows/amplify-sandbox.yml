@@ -1,0 +1,122 @@
+name: Amplify ephemeral sandbox
+
+# Reusable: deploy + seed (action: deploy) or delete (action: teardown) THIS run's
+# own Amplify sandbox. Every job of a run resolves the same sandbox from
+# SANDBOX_IDENTIFIER (default ci-<run id>; the repo's scripts/sandbox.mjs turns it
+# into the stack name and the scheduled sweep only ever matches that shape).
+#
+#   jobs:
+#     sandbox:
+#       uses: johnpc/ci-workflows/.github/workflows/amplify-sandbox.yml@v1
+#       secrets: inherit
+#       with:
+#         action: deploy
+#         seed-command: |
+#           npm run ensure-editor
+#           npm run seed
+#         secret-env: TEST_USERNAME TEST_PASSWORD
+#     ...
+#     teardown:
+#       needs: [sandbox, quality, acceptance]
+#       if: always()
+#       uses: johnpc/ci-workflows/.github/workflows/amplify-sandbox.yml@v1
+#       secrets: inherit
+#       with:
+#         action: teardown
+on:
+  workflow_call:
+    inputs:
+      action:
+        description: deploy | teardown
+        type: string
+        required: true
+      sandbox-identifier:
+        description: "'' = ci-<run id>"
+        type: string
+        default: ''
+      deploy-command:
+        type: string
+        default: npm run sandbox:deploy
+      config-command:
+        description: Generates amplify_outputs.json for the sandbox after deploying
+        type: string
+        default: npm run e2e-config
+      seed-command:
+        description: Commands that create accounts / seed data (multi-line)
+        type: string
+        default: ''
+      teardown-command:
+        description: Must be a no-op when the stack never existed, and fail if it is still there afterwards
+        type: string
+        default: npm run sandbox:delete
+      secret-env:
+        description: "Names of caller secrets exported as env (needs secrets: inherit)"
+        type: string
+        default: ''
+      node-version:
+        type: string
+        default: '26'
+      npm-ci-args:
+        type: string
+        default: ''
+      runner:
+        type: string
+        default: '"ubuntu-latest"'
+      timeout-minutes:
+        type: number
+        default: 40
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+
+jobs:
+  sandbox:
+    name: ${{ inputs.action == 'teardown' && 'Tear down ephemeral sandbox' || 'Deploy + seed ephemeral sandbox' }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    env:
+      SANDBOX_IDENTIFIER: ${{ inputs.sandbox-identifier || format('ci-{0}', github.run_id) }}
+    steps:
+      - name: Check the action
+        env:
+          ACTION: ${{ inputs.action }}
+        run: |
+          case "$ACTION" in deploy|teardown) ;; *) echo "::error::action must be deploy or teardown"; exit 1;; esac
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.action == 'deploy' && 'npm' || '' }}
+      # No `npm ci` for teardown: deletion needs only node + the aws CLI, so it still
+      # works when the run itself failed installing dependencies.
+      - name: Install dependencies
+        if: inputs.action == 'deploy'
+        env:
+          NPM_CI_ARGS: ${{ inputs.npm-ci-args }}
+        run: |
+          # shellcheck disable=SC2086  # NPM_CI_ARGS is a list of flags
+          npm ci $NPM_CI_ARGS
+      - uses: johnpc/ci-workflows/actions/aws-profile@v1
+        with:
+          access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - uses: johnpc/ci-workflows/actions/export-secrets@v1
+        with:
+          names: ${{ inputs.secret-env }}
+          secrets-json: ${{ toJSON(secrets) }}
+      - name: Deploy the per-run sandbox (${{ env.SANDBOX_IDENTIFIER }})
+        if: inputs.action == 'deploy'
+        run: ${{ inputs.deploy-command }}
+      - name: Generate amplify_outputs.json (sandbox)
+        if: inputs.action == 'deploy' && inputs.config-command != ''
+        run: ${{ inputs.config-command }}
+      - name: Seed the sandbox to a known state
+        if: inputs.action == 'deploy' && inputs.seed-command != ''
+        run: ${{ inputs.seed-command }}
+      - name: Delete the per-run sandbox (${{ env.SANDBOX_IDENTIFIER }})
+        if: inputs.action == 'teardown'
+        run: ${{ inputs.teardown-command }}

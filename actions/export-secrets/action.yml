@@ -1,0 +1,33 @@
+name: Export named secrets as environment variables
+description: >
+  Export the named entries of a secrets JSON (pass toJSON(secrets) from a reusable
+  workflow called with `secrets: inherit`) into GITHUB_ENV for the rest of the job,
+  e.g. build-time keys a web build or an xcconfig needs. Values stay masked.
+inputs:
+  names:
+    description: Space- or newline-separated secret names
+    default: ''
+  secrets-json:
+    description: toJSON(secrets)
+    default: '{}'
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        NAMES: ${{ inputs.names }}
+        SECRETS_JSON: ${{ inputs.secrets-json }}
+      run: |
+        set -euo pipefail
+        [ -n "$(echo "$NAMES" | tr -d '[:space:]')" ] || exit 0
+        python3 - <<'PY'
+        import json, os, secrets as rnd
+        data = json.loads(os.environ["SECRETS_JSON"] or "{}")
+        with open(os.environ["GITHUB_ENV"], "a") as env:
+            for name in os.environ["NAMES"].split():
+                if name not in data:
+                    raise SystemExit(f"secret {name} is not available (call with `secrets: inherit`)")
+                eof = "EOF_" + rnd.token_hex(8)
+                env.write(f"{name}<<{eof}\n{data[name]}\n{eof}\n")
+                print(f"exported {name}")
+        PY

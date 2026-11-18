@@ -1,0 +1,75 @@
+name: Sandbox cleanup
+
+# Reusable backstop for CI's per-run Amplify sandboxes: runs the repo's own sweep
+# script, which deletes ONLY root stacks named like a CI sandbox and older than
+# `hours` (never a developer sandbox, never the prod branch stack).
+#
+#   on:
+#     schedule: [{cron: '17 */6 * * *'}]
+#     workflow_dispatch:
+#       inputs:
+#         apply: {description: 'Actually delete (unchecked = dry run)', type: boolean, default: false}
+#   jobs:
+#     sweep:
+#       uses: johnpc/ci-workflows/.github/workflows/sandbox-cleanup.yml@v1
+#       secrets: inherit
+#       with:
+#         apply: ${{ github.event_name == 'schedule' || inputs.apply }}
+on:
+  workflow_call:
+    inputs:
+      apply:
+        description: Actually delete (false = dry run)
+        type: boolean
+        default: false
+      sweep-command:
+        description: Sweep command; gets "<sweep-args> [--apply]" appended
+        type: string
+        default: npm run sandbox:sweep --
+      sweep-args:
+        description: Age filter arguments for the sweep script
+        type: string
+        default: --hours 6
+      install:
+        description: Run npm ci first (only when the sweep script needs node_modules)
+        type: boolean
+        default: false
+      node-version:
+        type: string
+        default: '26'
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+
+jobs:
+  sweep:
+    name: Delete leaked CI sandboxes
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: sandbox-cleanup-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Install dependencies
+        if: inputs.install
+        run: npm ci
+      - uses: johnpc/ci-workflows/actions/aws-profile@v1
+        with:
+          access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Sweep leaked CI sandboxes (${{ inputs.sweep-args }})
+        env:
+          SWEEP: ${{ inputs.sweep-command }}
+          ARGS: ${{ inputs.sweep-args }}
+          APPLY: ${{ inputs.apply && '--apply' || '' }}
+        run: |
+          # shellcheck disable=SC2086  # command lines, split on purpose
+          $SWEEP $ARGS $APPLY

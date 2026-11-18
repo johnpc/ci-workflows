@@ -1,0 +1,147 @@
+name: iOS deploy (native Xcode)
+
+# Reusable: sign a native Xcode app from the Mac mini CI keychain, archive, upload
+# to App Store Connect (bumping the version through an auto-merging PR when it
+# already exists) and optionally hand the build to external TestFlight groups.
+# Never submits for App Store review. Call it as the last job of the repo's quality
+# gates:
+#
+#   deploy:
+#     needs: [unit-tests, acceptance-tests]
+#     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+#     uses: johnpc/ci-workflows/.github/workflows/ios-deploy-native.yml@v1
+#     secrets: inherit
+#     with:
+#       project: MyApp.xcodeproj
+#       scheme: MyApp
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: Path to the .xcodeproj
+        type: string
+        required: true
+      scheme:
+        type: string
+        required: true
+      workspace:
+        description: Path to an .xcworkspace to archive ('' = the project)
+        type: string
+        default: ''
+      bundle-id:
+        description: App bundle id (only needed for external-beta)
+        type: string
+        default: ''
+      archive-name:
+        type: string
+        default: ''
+      bump:
+        description: Version part bumped when the version already exists (patch | minor)
+        type: string
+        default: minor
+      ref:
+        description: Ref to deploy ('' = the triggering commit)
+        type: string
+        default: ''
+      setup-command:
+        description: Runs before signing, e.g. "brew install xcodegen && xcodegen generate" or writing an xcconfig from secret-env
+        type: string
+        default: ''
+      secret-env:
+        description: "Names of caller secrets exported as env for setup-command (needs secrets: inherit)"
+        type: string
+        default: ''
+      xcodebuild-args:
+        description: Extra xcodebuild archive arguments
+        type: string
+        default: ''
+      destination:
+        type: string
+        default: generic/platform=iOS
+      platform:
+        description: Profile platform (ios | tvos)
+        type: string
+        default: ios
+      profiles:
+        description: Newline-separated BUNDLE_ID=PROFILE_NAME pins to existing installed profiles
+        type: string
+        default: ''
+      external-beta:
+        type: boolean
+        default: false
+      ci-workflow:
+        description: CI workflow file to dispatch on a bump PR branch so required checks run (protected repos)
+        type: string
+        default: ''
+      runner:
+        description: JSON runs-on value
+        type: string
+        default: '["self-hosted", "mac-mini"]'
+      timeout-minutes:
+        type: number
+        default: 60
+    secrets:
+      ASC_KEY_ID:
+        required: true
+      ASC_ISSUER_ID:
+        required: true
+      ASC_KEY_CONTENT:
+        required: true
+      CI_KEYCHAIN_PASSWORD:
+        required: false
+    outputs:
+      version:
+        description: Marketing version uploaded
+        value: ${{ jobs.deploy.outputs.version }}
+      build-number:
+        description: Build number uploaded
+        value: ${{ jobs.deploy.outputs.build-number }}
+
+jobs:
+  deploy:
+    name: Deploy to App Store Connect
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    concurrency:
+      group: ios-deploy-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      build-number: ${{ steps.release.outputs.build-number }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: johnpc/ci-workflows/actions/export-secrets@v1
+        with:
+          names: ${{ inputs.secret-env }}
+          secrets-json: ${{ toJSON(secrets) }}
+
+      - name: Prepare the project
+        if: inputs.setup-command != ''
+        run: ${{ inputs.setup-command }}
+
+      - uses: johnpc/ci-workflows/actions/ios-release@v1
+        id: release
+        with:
+          project: ${{ inputs.project }}
+          workspace: ${{ inputs.workspace }}
+          scheme: ${{ inputs.scheme }}
+          archive-name: ${{ inputs.archive-name }}
+          destination: ${{ inputs.destination }}
+          platform: ${{ inputs.platform }}
+          xcodebuild-args: ${{ inputs.xcodebuild-args }}
+          profiles: ${{ inputs.profiles }}
+          bump: ${{ inputs.bump }}
+          bundle-id: ${{ inputs.bundle-id }}
+          external-beta: ${{ inputs.external-beta }}
+          ci-workflow: ${{ inputs.ci-workflow }}
+          asc-key-id: ${{ secrets.ASC_KEY_ID }}
+          asc-issuer-id: ${{ secrets.ASC_ISSUER_ID }}
+          asc-key-content: ${{ secrets.ASC_KEY_CONTENT }}
+          keychain-password: ${{ secrets.CI_KEYCHAIN_PASSWORD }}

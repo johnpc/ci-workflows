@@ -1,0 +1,182 @@
+name: Node checks
+
+# Reusable: one Node job that runs the repo's own gate commands, optionally against
+# this run's Amplify sandbox (config-command) and optionally as a matrix of
+# acceptance areas. The commands stay in the repo (package.json / scripts/); this
+# only standardises the setup around them.
+#
+#   quality:
+#     needs: sandbox
+#     uses: johnpc/ci-workflows/.github/workflows/node-checks.yml@v1
+#     secrets: inherit
+#     with:
+#       name: Lint, Test, Coverage, CRAP & Build
+#       config-command: npm run e2e-config
+#       commands: |
+#         npm run lint
+#         npm run test:coverage
+#         npm run build
+#       artifact-paths: coverage/
+#
+#   acceptance:
+#     needs: sandbox
+#     uses: johnpc/ci-workflows/.github/workflows/node-checks.yml@v1
+#     secrets: inherit
+#     with:
+#       name: Acceptance Tests
+#       config-command: npm run e2e-config
+#       playwright: true
+#       areas: '[{"name":"study","paths":".features-gen/e2e/features/study"}]'
+#       commands: npx bddgen && npx playwright test $AREA_PATHS
+#       secret-env: TEST_USERNAME TEST_PASSWORD
+#       artifact-paths: playwright-report/
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: Job name (an area matrix appends " (<area>)")
+        type: string
+        required: true
+      commands:
+        description: Bash run after setup; $AREA_NAME / $AREA_PATHS are set for area legs
+        type: string
+        required: true
+      areas:
+        description: 'JSON array of {"name","paths"} acceptance areas; [] = one job'
+        type: string
+        default: '[]'
+      config-command:
+        description: Runs after the AWS profile is written (e.g. npm run e2e-config); '' = none
+        type: string
+        default: ''
+      sandbox-identifier:
+        description: "'' = ci-<run id>, the same sandbox the amplify-sandbox workflow deployed"
+        type: string
+        default: ''
+      playwright:
+        description: Install Playwright chromium with its system deps
+        type: boolean
+        default: false
+      secret-env:
+        description: "Names of caller secrets exported as env (needs secrets: inherit)"
+        type: string
+        default: ''
+      artifact-paths:
+        description: Paths uploaded as an artifact (always), '' = none
+        type: string
+        default: ''
+      node-version:
+        type: string
+        default: '26'
+      npm-ci-args:
+        type: string
+        default: ''
+      runner:
+        description: JSON runs-on value (self-hosted runners get no setup-node cache)
+        type: string
+        default: '"ubuntu-latest"'
+      timeout-minutes:
+        type: number
+        default: 30
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+
+jobs:
+  single:
+    if: inputs.areas == '[]'
+    name: ${{ inputs.name }}
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    env:
+      SANDBOX_IDENTIFIER: ${{ inputs.sandbox-identifier || format('ci-{0}', github.run_id) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ !contains(inputs.runner, 'self-hosted') && 'npm' || '' }}
+          package-manager-cache: ${{ !contains(inputs.runner, 'self-hosted') }}
+      - name: Install dependencies
+        env:
+          NPM_CI_ARGS: ${{ inputs.npm-ci-args }}
+        run: |
+          # shellcheck disable=SC2086  # NPM_CI_ARGS is a list of flags
+          npm ci $NPM_CI_ARGS
+      - uses: johnpc/ci-workflows/actions/aws-profile@v1
+        with:
+          access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - uses: johnpc/ci-workflows/actions/export-secrets@v1
+        with:
+          names: ${{ inputs.secret-env }}
+          secrets-json: ${{ toJSON(secrets) }}
+      - name: Generate the app config
+        if: inputs.config-command != ''
+        run: ${{ inputs.config-command }}
+      - name: Install Playwright browsers
+        if: inputs.playwright
+        run: npx playwright install --with-deps chromium
+      - name: Run
+        run: ${{ inputs.commands }}
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.artifact-paths != ''
+        with:
+          name: ${{ github.job }}-report
+          path: ${{ inputs.artifact-paths }}
+          retention-days: 7
+
+  area:
+    if: inputs.areas != '[]'
+    name: ${{ inputs.name }} (${{ matrix.area.name }})
+    runs-on: ${{ fromJSON(inputs.runner) }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        area: ${{ fromJSON(inputs.areas) }}
+    env:
+      SANDBOX_IDENTIFIER: ${{ inputs.sandbox-identifier || format('ci-{0}', github.run_id) }}
+      AREA_NAME: ${{ matrix.area.name }}
+      AREA_PATHS: ${{ matrix.area.paths }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ !contains(inputs.runner, 'self-hosted') && 'npm' || '' }}
+          package-manager-cache: ${{ !contains(inputs.runner, 'self-hosted') }}
+      - name: Install dependencies
+        env:
+          NPM_CI_ARGS: ${{ inputs.npm-ci-args }}
+        run: |
+          # shellcheck disable=SC2086  # NPM_CI_ARGS is a list of flags
+          npm ci $NPM_CI_ARGS
+      - uses: johnpc/ci-workflows/actions/aws-profile@v1
+        with:
+          access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - uses: johnpc/ci-workflows/actions/export-secrets@v1
+        with:
+          names: ${{ inputs.secret-env }}
+          secrets-json: ${{ toJSON(secrets) }}
+      - name: Generate the app config
+        if: inputs.config-command != ''
+        run: ${{ inputs.config-command }}
+      - name: Install Playwright browsers
+        if: inputs.playwright
+        run: npx playwright install --with-deps chromium
+      - name: Run (${{ matrix.area.name }})
+        run: ${{ inputs.commands }}
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.artifact-paths != ''
+        with:
+          name: ${{ github.job }}-${{ matrix.area.name }}-report
+          path: ${{ inputs.artifact-paths }}
+          retention-days: 7
