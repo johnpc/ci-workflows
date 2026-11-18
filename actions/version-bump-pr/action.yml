@@ -2,7 +2,7 @@ name: Record a version bump through an auto-merging PR
 description: >
   Commit the given files on ci/bump-version-<version>, open a PR against the default
   branch and have it merge itself: auto-merge when the branch is protected (with an
-  optional workflow_dispatch of the CI workflow so the required checks exist on the
+  approval of its gated pull_request runs so the required checks report on the
   bot's commit), or an immediate squash merge when it is not. Never pushes to a
   protected branch. The PR body names the build number ($BUILD_NUM from GITHUB_ENV).
 inputs:
@@ -23,9 +23,10 @@ inputs:
     default: ''
   ci-workflow:
     description: >
-      Workflow file to dispatch on the bump branch so required checks run (a PR opened
-      with GITHUB_TOKEN triggers no pull_request workflows). The workflow needs a
-      workflow_dispatch trigger. '' = do not dispatch.
+      Fallback only: workflow file to dispatch on the bump branch when the bump PR gets
+      no pull_request run at all (its gated runs are approved instead; dispatched
+      checks do not satisfy required checks while a gated PR run exists). Needs a
+      workflow_dispatch trigger. '' = never dispatch.
     default: ''
   token:
     description: Token for git push and gh (needs contents, pull-requests and actions write)

@@ -69,9 +69,7 @@ URL=$(echo "$URL" | tail -1)
 echo "opened $URL"
 echo "pr-url=$URL" >> "$GITHUB_OUTPUT"
 
-# Protected base: let GitHub merge it once the required checks pass. A PR opened
-# with GITHUB_TOKEN starts no pull_request workflows, so dispatch CI on the branch
-# (its check runs land on the same commit and satisfy the required checks).
+# Protected base: let GitHub merge it once the required checks pass.
 # A strict protected main ("require branches to be up to date") never auto-merges a
 # branch that is behind, and auto-merge does not update it: if main moved during the
 # deploy, update the branch first (then the dispatched CI runs on the updated head).
@@ -91,9 +89,35 @@ fi
 if gh pr merge "$URL" --auto --squash --delete-branch 2>/tmp/bump-merge.$$; then
   STATE=$(gh pr view "$URL" --json state --jq .state)
   echo "auto-merge requested (state: $STATE)"
-  if [ "$STATE" != "MERGED" ] && [ -n "${CI_WORKFLOW:-}" ]; then
+  [ "$STATE" = "MERGED" ] && exit 0
+  # The bot's PR gets its own pull_request run, but public repos gate it behind
+  # "approval for first-time contributors" (github-actions[bot] never qualifies), and
+  # a gated run blocks the required checks: a workflow_dispatch run's checks on the
+  # same commit do NOT satisfy them (proven on johnpc/ci-workflows-bump-test). So
+  # approve this PR's gated runs; dispatch CI only if no pull_request run ever shows up.
+  HEAD_SHA=$(gh pr view "$URL" --json headRefOid --jq .headRefOid)
+  RUNS=""
+  for _ in $(seq 1 12); do
+    RUNS=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?event=pull_request&head_sha=$HEAD_SHA" \
+      --jq '.workflow_runs[] | "\(.id) \(.conclusion)"' || true)
+    [ -n "$RUNS" ] && break
+    sleep 10
+  done
+  if [ -n "$RUNS" ]; then
+    echo "$RUNS" | while read -r id conclusion; do
+      if [ "$conclusion" = "action_required" ]; then
+        if gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/approve" >/dev/null; then
+          echo "approved gated pull_request run $id"
+        else
+          echo "::warning::could not approve pull_request run $id; approve it in the Actions tab so the bump PR can merge"
+        fi
+      fi
+    done
+  elif [ -n "${CI_WORKFLOW:-}" ]; then
     gh workflow run "$CI_WORKFLOW" --ref "$BRANCH"
-    echo "dispatched $CI_WORKFLOW on $BRANCH for the required checks"
+    echo "no pull_request run appeared; dispatched $CI_WORKFLOW on $BRANCH for the required checks"
+  else
+    echo "::warning::no CI run on the bump PR; it merges once its required checks report"
   fi
   exit 0
 fi
