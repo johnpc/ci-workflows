@@ -52,7 +52,7 @@ Reusable jobs cannot exceed the caller's token permissions. iOS deploy callers:
 permissions:
   contents: write       # bump branch / direct merge
   pull-requests: write  # bump PR
-  actions: write        # dispatch CI on the bump branch (protected repos)
+  actions: write        # approve the bump PR's gated CI run (protected repos)
 ```
 
 Repos that should get the bump as a PR also need *Settings → Actions → General →
