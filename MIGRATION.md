@@ -75,6 +75,13 @@ No repo uses rulesets. Every protected repo needs the protected-repo bump setup 
   Deploy jobs are never required checks, so migrating a deploy is safe everywhere. For
   CI jobs on protected repos, update the required checks in the SAME change window:
   add the new names, merge, then drop the old names.
+- **Repo hooks and build output**: the bump commit runs with hooks off (`HUSKY=0`,
+  `core.hooksPath=/dev/null`; its PR runs full CI anyway), commits only the version
+  files, and first deletes `ios-smoke-output/` and `ios/.smoke-App` (`clean-paths`).
+  Since v1.3.0 the launch smoke keeps DerivedData and its remove-pods scratch copy under
+  `$RUNNER_TEMP`, outside the checkout. Still, any hook or lint that scans the whole
+  workspace (`eslint .`, `prettier --check .`) should ignore build-output dirs:
+  `ios-smoke-output/`, `ios/App/build/`, `DerivedData/`, `android/app/build/`.
 - **GUI session**: `ios-release` fails fast unless `launchctl print gui/$(id -u)`
   succeeds (no console login for the runner user = the export SIGTRAPs in AppSSO);
   on any export failure it prints the IDEDistribution standard/critical logs and

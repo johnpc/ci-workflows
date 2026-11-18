@@ -21,10 +21,27 @@ TITLE="chore(release): bump version to ${NEW_VERSION}"
 
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+# Smoke and build output (the launch smoke's DerivedData, its scratch iOS copy) is
+# not ours to commit, and a repo hook that scans the workspace (eslint .) chokes on it.
+# shellcheck disable=SC2086  # space-separated lists on purpose
+for p in ${CLEAN_PATHS:-ios-smoke-output ios/.smoke-App}; do
+  case "$p" in /*|*..*) echo "::warning::skipping unsafe clean path $p"; continue;; esac
+  [ -e "$p" ] && rm -rf -- "$p" && echo "removed build output $p"
+done
 git checkout -B "$BRANCH"
+git reset -q  # stage nothing but FILES
 # shellcheck disable=SC2086  # FILES is a space-separated list on purpose
 git add -- $FILES
-git commit -m "$TITLE"
+STAGED=$(git diff --cached --name-only)
+[ -n "$STAGED" ] || { echo "::error::nothing to commit: $FILES did not change"; exit 1; }
+for f in $STAGED; do
+  case " $FILES " in *" $f "*) ;; *) echo "::error::refusing to commit $f: the bump commits only $FILES"; exit 1;; esac
+done
+echo "staged: $STAGED"
+# Hooks off: a MARKETING_VERSION-only diff whose PR runs the repo's full CI anyway;
+# the repo's pre-commit (lint, coverage, build) only adds minutes and failure modes.
+NOHOOKS=(-c core.hooksPath=/dev/null)
+HUSKY=0 git "${NOHOOKS[@]}" commit -m "$TITLE"
 
 BODY="Automated by the iOS deploy (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}): ${OLD_VERSION} already exists in App Store Connect, so build ${BUILD_NUM} was uploaded as ${NEW_VERSION}. This PR records that bump."
 
@@ -36,7 +53,7 @@ if [ "${BUMP_REBASE:-true}" = "true" ]; then
   git fetch -q --deepen=100 origin 2>/dev/null || true
   git fetch -q origin "$BASE"
   if ! git merge-base --is-ancestor "origin/$BASE" HEAD; then
-    if git rebase -q "origin/$BASE"; then
+    if HUSKY=0 git "${NOHOOKS[@]}" rebase -q "origin/$BASE"; then
       echo "rebased the bump onto the current $BASE ($(git rev-parse --short "origin/$BASE"))"
     else
       git rebase --abort || true
@@ -46,7 +63,7 @@ if [ "${BUMP_REBASE:-true}" = "true" ]; then
   fi
 fi
 
-if ! git push -f -u origin "$BRANCH"; then
+if ! git "${NOHOOKS[@]}" push -f -u origin "$BRANCH"; then
   echo "::error::could not push $BRANCH; the bump to $NEW_VERSION (build $BUILD_NUM) is uploaded but NOT recorded in git"
   exit 1
 fi
@@ -56,7 +73,7 @@ if ! URL=$(gh pr create --base "$BASE" --head "$BRANCH" --title "$TITLE" --body 
   # (repo setting). An unprotected base still takes a direct push; a protected one
   # must not be bypassed, so fail loudly there.
   echo "$URL"
-  if git fetch -q --depth=50 origin "$BASE" && git rebase -q "origin/$BASE" && git push origin "HEAD:$BASE"; then
+  if git fetch -q --depth=50 origin "$BASE" && HUSKY=0 git "${NOHOOKS[@]}" rebase -q "origin/$BASE" && git "${NOHOOKS[@]}" push origin "HEAD:$BASE"; then
     echo "::warning title=Version bump pushed directly::could not open a PR ($URL); pushed $TITLE straight to $BASE. Enable 'Allow GitHub Actions to create and approve pull requests' to get the PR flow."
     git push origin --delete "$BRANCH" || true
     echo "pr-url=" >> "$GITHUB_OUTPUT"

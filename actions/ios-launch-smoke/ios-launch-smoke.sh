@@ -74,6 +74,11 @@ mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 STARTED=$(date "+%Y-%m-%d %H:%M:%S")
 MARKER="$OUT/.started"; touch "$MARKER"
+# Build products and the scratch iOS copy live OUTSIDE the checkout (per-job
+# $RUNNER_TEMP on CI): left in the workspace, a later commit's repo hooks
+# (eslint ., prettier --check .) scanned them and failed the deploy's bump commit.
+SCRATCH="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ios-smoke.XXXXXX")"
+DERIVED="${SMOKE_DERIVED_DATA:-$SCRATCH/DerivedData}"
 UDID=""; SIMCTL_PID=""
 cleanup() {
   # Screenshot BEFORE stopping the console-attached launch: ending it ends the app,
@@ -88,13 +93,17 @@ cleanup() {
       xcrun simctl delete "$UDID" >/dev/null 2>&1 || true
     fi
   fi
+  # Keep only the evidence: DerivedData and the scratch copy go.
+  if [ "${SMOKE_KEEP_SIM:-0}" != "1" ] && [ -n "${SCRATCH:-}" ]; then
+    rm -rf -- "$SCRATCH" || true
+  fi
 }
 trap cleanup EXIT
 
 # ---- 1. Web bundle synced into the native project ---------------------------------
 if [ "$WEB_BUILD" = "1" ]; then
   say "building the web app"
-  ${SMOKE_WEB_BUILD_CMD:-npm run build} >"$OUT/web-build.log" 2>&1 || { tail -30 "$OUT/web-build.log" >&2; fail "web build failed"; }
+  bash -c "${SMOKE_WEB_BUILD_CMD:-npm run build}" >"$OUT/web-build.log" 2>&1 || { tail -30 "$OUT/web-build.log" >&2; fail "web build failed"; }
   npx cap sync ios >"$OUT/cap-sync.log" 2>&1 || { tail -30 "$OUT/cap-sync.log" >&2; fail "cap sync failed"; }
 fi
 [ -f "$IOS/App/public/index.html" ] || fail "no synced web bundle at $IOS/App/public — run the web build + cap sync first"
@@ -108,8 +117,28 @@ if [ -n "$REMOVE_PODS" ]; then
   # scratch copy with only those pods removed. It proves the native shell launches;
   # it cannot exercise the removed pods. The real $IOS/Pods is never touched.
   [ -f "$IOS/Podfile" ] || fail "SMOKE_REMOVE_PODS is set but $IOS has no Podfile"
-  SMOKE_IOS="$(dirname "$IOS")/.smoke-$(basename "$IOS")"  # same depth: the Podfile's ../../node_modules paths still resolve
-  rm -rf "$SMOKE_IOS"; mkdir -p "$SMOKE_IOS"
+  # Mirror the repo layout under $SCRATCH: the copy sits at the same depth as $IOS and
+  # every other top-level entry (node_modules, ...) is a symlink to the real one, so
+  # the Podfile's relative paths (../../node_modules/@capacitor/ios) still resolve.
+  SMOKE_IOS="$SCRATCH/repo/$IOS"
+  mkdir -p "$SMOKE_IOS"
+  TOP="${IOS%%/*}"
+  for entry in * .[!.]*; do
+    [ -e "$entry" ] || continue
+    [ "$entry" = "$TOP" ] && continue
+    ln -s "$PWD/$entry" "$SCRATCH/repo/$entry"
+  done
+  # Siblings of $IOS inside its parent directories (e.g. ios/capacitor-cordova-ios-plugins).
+  rel="$IOS"
+  while [ "$rel" != "$TOP" ] && [ "$rel" != "." ]; do
+    parent="$(dirname "$rel")"
+    for entry in "$parent"/* "$parent"/.[!.]*; do
+      [ -e "$entry" ] || continue
+      case "$IOS/" in "$entry"/*) continue;; esac
+      [ -e "$SCRATCH/repo/$entry" ] || ln -s "$PWD/$entry" "$SCRATCH/repo/$entry"
+    done
+    rel="$parent"
+  done
   rsync -a --exclude Pods --exclude '*.xcworkspace' --exclude build "$IOS/" "$SMOKE_IOS/"
   for pod in $REMOVE_PODS; do
     grep -q "$pod" "$SMOKE_IOS/Podfile" || fail "SMOKE_REMOVE_PODS names $pod but $IOS/Podfile does not use it"
@@ -131,12 +160,12 @@ xcrun simctl boot "$UDID"
 xcrun simctl bootstatus "$UDID" -b >/dev/null || fail "simulator never finished booting"
 say "building $BUNDLE_ID for simulator $UDID"
 xcodebuild "${PROJ[@]}" -scheme "$SCHEME" -configuration Debug \
-  -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath "$OUT/DerivedData" \
+  -destination "platform=iOS Simulator,id=$UDID" -derivedDataPath "$DERIVED" \
   CODE_SIGNING_ALLOWED=NO ENABLE_DEBUG_DYLIB=NO build >"$OUT/xcodebuild.log" 2>&1 \
   || { grep -E "error:|BUILD FAILED" "$OUT/xcodebuild.log" | head -30 >&2; fail "xcodebuild failed (log: $OUT/xcodebuild.log)"; }
 # The scheme is usually "App", but the product can be named after the target
 # (e.g. "Small Crosswords.app"), so take whichever single .app the build produced.
-APP=$(find "$OUT/DerivedData/Build/Products/Debug-iphonesimulator" -maxdepth 1 -name "*.app" | head -1)
+APP=$(find "$DERIVED/Build/Products/Debug-iphonesimulator" -maxdepth 1 -name "*.app" | head -1)
 [ -n "$APP" ] && [ -d "$APP" ] || fail "no app bundle under $OUT/DerivedData/Build/Products/Debug-iphonesimulator"
 # Launch what was BUILT: a Debug configuration may carry its own bundle id.
 BUILT_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist" 2>/dev/null || true)

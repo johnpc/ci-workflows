@@ -31,6 +31,9 @@ inputs:
   token:
     description: Token for git push and gh (needs contents, pull-requests and actions write)
     default: ${{ github.token }}
+  clean-paths:
+    description: Space-separated workspace paths (build/smoke output) removed before committing
+    default: ios-smoke-output ios/.smoke-App
   rebase:
     description: "'true' = rebase the bump onto the current base before pushing"
     default: 'true'
@@ -52,4 +55,5 @@ runs:
         BASE_INPUT: ${{ inputs.base }}
         CI_WORKFLOW: ${{ inputs.ci-workflow }}
         BUMP_REBASE: ${{ inputs.rebase }}
+        CLEAN_PATHS: ${{ inputs.clean-paths }}
       run: bash "$GITHUB_ACTION_PATH/bump-pr.sh"
