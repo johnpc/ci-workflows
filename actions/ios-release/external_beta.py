@@ -14,6 +14,9 @@ import urllib.parse
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ios-signing"))
 import asc_api  # noqa: E402
 
+ATTACH_ATTEMPTS = 20
+ATTACH_DELAY_S = 15
+
 
 def api(method, path, body=None):
     # App Store Connect answers a transient 500 now and then; retry server errors
@@ -27,6 +30,24 @@ def api(method, path, body=None):
             if " failed: 5" not in msg or attempt == 3:
                 raise
             time.sleep(10 * attempt)
+
+
+def attach(group_id, build_id):
+    # A build that /v1/builds already reports VALID can still be unknown to the
+    # beta-group relationship endpoint for a short while (ASC replication lag): it
+    # answers 404 "There is no resource of type 'builds'" (jpc-countdowns run
+    # 44421773207, 2026-11-18, failed on the first POST; the rerun passed). Retry
+    # only that 404 for up to 5 minutes; anything else is a real error.
+    for attempt in range(1, ATTACH_ATTEMPTS + 1):
+        try:
+            return api("POST", f"/v1/betaGroups/{group_id}/relationships/builds",
+                       {"data": [{"type": "builds", "id": build_id}]})
+        except SystemExit as e:
+            msg = str(e)
+            if " failed: 404" not in msg or "'builds'" not in msg or attempt == ATTACH_ATTEMPTS:
+                raise
+            print(f"  build {build_id} not visible to beta groups yet ({attempt}/{ATTACH_ATTEMPTS}); retrying in {ATTACH_DELAY_S} s")
+            time.sleep(ATTACH_DELAY_S)
 
 
 def main():
@@ -57,8 +78,7 @@ def main():
         print("No external beta group: the build is uploaded and available to internal testers.")
         return
     for g in groups:
-        api("POST", f"/v1/betaGroups/{g['id']}/relationships/builds",
-            {"data": [{"type": "builds", "id": build["id"]}]})
+        attach(g["id"], build["id"])
         print(f"  attached build {build_num} to external group '{g['attributes'].get('name', g['id'])}'")
     print(f"Done: build {build_num} distributed to {len(groups)} external group(s).")
 
